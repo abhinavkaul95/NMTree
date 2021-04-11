@@ -96,7 +96,7 @@ def transfer_dataset(refer):
     # processing data: prune punct and convert all verb to v-ing
     new_sents = []
     pbar = tqdm(total=len(sents))
-    for idx, doc in enumerate(nlp.pipe(sents, batch_size=256, n_threads=16, disable=['parser'])):
+    for idx, doc in enumerate(nlp.pipe(sents, batch_size=256,  disable=['parser'])):
         new_sent, new, old_sent, old = doc_prune(doc)
         new_sents.append(new_sent)
 
@@ -114,7 +114,7 @@ def transfer_dataset(refer):
     tag_list = []
     dep_list = []
     pbar = tqdm(total=len(new_sents))
-    for idx, doc in enumerate(nlp.pipe(new_sents, batch_size=256, n_threads=16)):
+    for idx, doc in enumerate(nlp.pipe(new_sents, batch_size=256)):
         t, s = doc_to_tree(doc)
 
         tree_list.append(t)

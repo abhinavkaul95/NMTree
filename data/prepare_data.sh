@@ -18,4 +18,4 @@ if [ ! -f glove.840B.300d.txt ]; then
   wget http://nlp.stanford.edu/data/wordvecs/glove.840B.300d.zip
   unzip glove.840B.300d.zip
   rm glove.840B.300d.zip
-if
+fi

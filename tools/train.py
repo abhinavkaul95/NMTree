@@ -126,7 +126,8 @@ def main(opt):
     if opt.glove and not opt.start_from:
         glove_weight = load_glove(glove=opt.glove, vocab=loader.word_to_ix, opt=opt)
         assert glove_weight.shape == model.word_embedding.weight.size()
-        model.word_embedding.weight.data.set_(torch.cuda.FloatTensor(glove_weight))
+        with torch.no_grad():
+            model.word_embedding.weight.set_(torch.cuda.FloatTensor(glove_weight))
         print("Load word vectors ...")
 
     # start training
