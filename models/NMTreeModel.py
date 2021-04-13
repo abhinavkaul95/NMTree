@@ -110,39 +110,39 @@ class NMTreeModel(nn.Module):
         self.rlt_attn_logit = nn.Linear(opt.rnn_size*2, 1)
         self.obj_attn_logit = nn.Linear(opt.rnn_size*2, 1)
 
-    def traversal(self, node, v, embedding):
+    def traversal(self, node, visual_feats, embedding):
         node.logit = self.node_to_logit(node)
         for idx in range(node.num_children):
-            self.traversal(node.children[idx], v, embedding)
+            self.traversal(node.children[idx], visual_feats, embedding)
 
         # Case 1: Leaf, update node.sub_word and node.score
         if node.num_children == 0:
             node.sub_word = [node.idx]
             node.sub_logit = [node.logit]
             sbj_embedding = self.attn_embedding(node.sub_word, node.sub_logit, embedding, 'sbj')
-            sbj_score = self.single_score(v, sbj_embedding)
+            sbj_score = self.single_score(visual_feats, sbj_embedding)
             node.score = sbj_score
         # Case 2: Not leaf
         else:
             sub_word = [node.idx]
             sub_logit = [node.logit]
-            for c in node.children:
-                sub_word = sub_word  + c.sub_word
-                sub_logit = sub_logit + c.sub_logit
+            for child in node.children:
+                sub_word = sub_word  + child.sub_word
+                sub_logit = sub_logit + child.sub_logit
 
             # Case 2.1: Not leaf, Language Node
             sbj_score = self.zero_score
-            for c in node.children:
-                sbj_score = sbj_score + c.score
+            for child in node.children:
+                sbj_score = sbj_score + child.score
 
             # Case 2.2: Not leaf, Visual Node
             obj_embedding = self.attn_embedding(sub_word, sub_logit, embedding, 'obj')
-            obj_score = self.single_score(v, obj_embedding)
-            for c in node.children:
-                obj_score = obj_score + c.score
+            obj_score = self.single_score(visual_feats, obj_embedding)
+            for child in node.children:
+                obj_score = obj_score + child.score
             node.obj_score = obj_score
             rlt_embedding = self.attn_embedding(sub_word, sub_logit, embedding, 'rlt')
-            rlt_score = self.pair_score(v, obj_score, rlt_embedding)
+            rlt_score = self.pair_score(visual_feats, obj_score, rlt_embedding)
 
             # Gumbel softmax, [lang, vis]
             node.sub_word = sub_word
@@ -173,18 +173,18 @@ class NMTreeModel(nn.Module):
             dep_ids.append(dep_id)
 
         word_ids = torch.tensor(word_ids).cuda()
-        w_embed = self.word_embedding(word_ids)
+        word_embed = self.word_embedding(word_ids)
         tag_ids = torch.tensor(tag_ids).cuda()
-        t_embed = self.tag_embedding(tag_ids)
+        tag_embed = self.tag_embedding(tag_ids)
         dep_ids = torch.tensor(dep_ids).cuda()
-        d_embed = self.dep_embedding(dep_ids)
+        dep_embed = self.dep_embedding(dep_ids)
 
-        embedding = torch.cat([w_embed, t_embed, d_embed], dim=-1)
+        embedding = torch.cat([word_embed, tag_embed, dep_embed], dim=-1)
         return self.dropout(embedding)
 
     def attn_embedding(self, word_list, logit_list, embedding, logit_type):
         embed = embedding[word_list]
-        logits = torch.stack([s[logit_type] for s in logit_list], dim=0)
+        logits = torch.stack([logit[logit_type] for logit in logit_list], dim=0)
 
         attn = torch.softmax(logits, dim=0)
         attn_embed = torch.mm(attn.unsqueeze(0), embed)
@@ -209,15 +209,15 @@ class NMTreeModel(nn.Module):
             sents:    list of words
         scores:   float32 (num_sent, num_box)
         """
-        vis = data['vis']
-        self.num_bbox = vis.size(1)
+        visual_features = data['vis']
+        self.num_bbox = visual_features.size(1)
         self.zero_score = torch.zeros((self.num_bbox, ), dtype=torch.float32, requires_grad=False).cuda()
 
         scores = []
         for i in range(len(data['trees'])):
             tree_dict = data['trees'][i]
             sent_list = data['sents'][i]
-            v = vis[i]
+            visual_feats = visual_features[i]
 
             # list of word embedding
             word_embed = self.list_to_embedding(sent_list)
@@ -227,18 +227,18 @@ class NMTreeModel(nn.Module):
 
             self.up_tree_lstm(tree, word_embed)
             self.down_tree_lstm(tree, word_embed)
-            self.traversal(tree, v, word_embed)
+            self.traversal(tree, visual_feats, word_embed)
 
             # for root
             if tree.type[0, 0]:
                 sbj_embedding = self.attn_embedding(tree.sub_word, tree.sub_logit, word_embed, 'sbj')
-                sbj_score = self.single_score(v, sbj_embedding)
+                sbj_score = self.single_score(visual_feats, sbj_embedding)
             else:
                 sbj_score = self.zero_score
 
-            s = sbj_score + tree.score
+            score = sbj_score + tree.score
 
-            scores.append(s)
+            scores.append(score)
 
         if is_show:
             print(tree.__vis__(['type_', 'word']))
