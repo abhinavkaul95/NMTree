@@ -35,18 +35,18 @@ class SingleScore(nn.Module):
         self.W = nn.Linear(vis_dim, word_size)
         self.fc = nn.Linear(word_size, 1)
 
-    def forward(self, v, w):
+    def forward(self, visual_feats, embedding):
         """
         v : vis:    Tensor float (num_bbox, vis_dim)
         w : embed:  Tensor float (word_size, )
         l : logit:  Tensor float (num_bbox, )
         """
-        v = self.W(v)
-        w = w.expand_as(v)
-        f = nn.functional.normalize(v * w, p=2, dim=1)
-        l = self.fc(f).squeeze(1)
+        mapped_visual_feats = self.W(visual_feats)
+        embedding = embedding.expand_as(mapped_visual_feats)
+        out = nn.functional.normalize(mapped_visual_feats * embedding, p=2, dim=1)
+        logits = self.fc(out).squeeze(1)
 
-        return l
+        return logits
 
 
 class PairScore(nn.Module):
@@ -57,23 +57,23 @@ class PairScore(nn.Module):
         self.W = nn.Linear(vis_dim * 2, word_size)
         self.fc = nn.Linear(word_size, 1)
 
-    def forward(self, v, l, w):
+    def forward(self, visual_feats, in_logits, embedding):
         """
         v   : vis:    Tensor float (num_bbox, vis_dim)
         l   : logit:  Tensor float (num_bbox, )
         w   : embed:  Tensor float (word_size, )
         l_2 : logit:  Tensor float (num_bbox, )
         """
-        s = F.softmax(l, 0)
-        v_2 = torch.mm(s.unsqueeze(0), v)
+        in_logits = F.softmax(in_logits, 0)
+        attended_feats = torch.mm(in_logits.unsqueeze(0), visual_feats)
 
-        v_3 = torch.cat((v, v_2.repeat(v.size(0), 1)), dim=1)
-        v_3 = self.W(v_3)
-        w = w.expand_as(v_3)
-        f = nn.functional.normalize(v_3 * w, p=2, dim=1)
-        l_2 = self.fc(f).squeeze(1)
+        attended_feats = torch.cat((visual_feats, attended_feats.repeat(visual_feats.size(0), 1)), dim=1)
+        mapped_attended_feats = self.W(attended_feats)
+        embedding = embedding.expand_as(mapped_attended_feats)
+        out = nn.functional.normalize(mapped_attended_feats * embedding, p=2, dim=1)
+        out_logits = self.fc(out).squeeze(1)
 
-        return l_2
+        return out_logits
 
 
 class NMTreeModel(nn.Module):
