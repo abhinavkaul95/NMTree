@@ -2,10 +2,6 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import math
-import numpy as np
-import time
-
 from . import gumbel
 
 import torch
@@ -14,24 +10,11 @@ from torch.nn import init
 import torch.nn.functional as F
 
 
-class Normalize_Scale(nn.Module):
-    def __init__(self, dim, init_norm=20):
-        super(Normalize_Scale, self).__init__()
-        self.init_norm = init_norm
-        self.weight = nn.Parameter(torch.ones(1, dim) * init_norm)
-
-    def forward(self, bottom):
-        # input is variable (n, dim)
-        bottom_normalized = nn.functional.normalize(bottom, p=2, dim=1)
-        bottom_normalized_scaled = bottom_normalized * self.weight
-        return bottom_normalized_scaled
-
-
 class SingleScore(nn.Module):
     """Compute a unsoftmax similarity between single region and language"""
+
     def __init__(self, vis_dim, word_size):
         super(SingleScore, self).__init__()
-
         self.W = nn.Linear(vis_dim, word_size)
         self.fc = nn.Linear(word_size, 1)
 
@@ -42,18 +25,20 @@ class SingleScore(nn.Module):
         l : logit:  Tensor float (num_bbox, )
         """
         mapped_visual_feats = self.W(visual_feats)
+        # expand as num_rois
         embedding = embedding.expand_as(mapped_visual_feats)
-        out = nn.functional.normalize(mapped_visual_feats * embedding, p=2, dim=1)
+        # normalized hadamard product matches the embedding to each visual feature
+        out = nn.functional.normalize(
+            mapped_visual_feats * embedding, p=2, dim=1)
         logits = self.fc(out).squeeze(1)
-
         return logits
 
 
 class PairScore(nn.Module):
     """Compute a unsoftmax similarity between pairwise regions and language"""
+
     def __init__(self, vis_dim, word_size):
         super(PairScore, self).__init__()
-
         self.W = nn.Linear(vis_dim * 2, word_size)
         self.fc = nn.Linear(word_size, 1)
 
@@ -66,13 +51,13 @@ class PairScore(nn.Module):
         """
         in_logits = F.softmax(in_logits, 0)
         attended_feats = torch.mm(in_logits.unsqueeze(0), visual_feats)
-
-        attended_feats = torch.cat((visual_feats, attended_feats.repeat(visual_feats.size(0), 1)), dim=1)
+        attended_feats = torch.cat(
+            (visual_feats, attended_feats.repeat(visual_feats.size(0), 1)), dim=1)
         mapped_attended_feats = self.W(attended_feats)
         embedding = embedding.expand_as(mapped_attended_feats)
-        out = nn.functional.normalize(mapped_attended_feats * embedding, p=2, dim=1)
+        out = nn.functional.normalize(
+            mapped_attended_feats * embedding, p=2, dim=1)
         out_logits = self.fc(out).squeeze(1)
-
         return out_logits
 
 
@@ -90,9 +75,9 @@ class NMTreeModel(nn.Module):
         self.word_embedding = nn.Embedding(num_embeddings=opt.word_vocab_size,
                                            embedding_dim=opt.word_size)
         self.tag_embedding = nn.Embedding(num_embeddings=opt.tag_vocab_size,
-                                           embedding_dim=opt.tag_size)
+                                          embedding_dim=opt.tag_size)
         self.dep_embedding = nn.Embedding(num_embeddings=opt.dep_vocab_size,
-                                           embedding_dim=opt.dep_size)
+                                          embedding_dim=opt.dep_size)
 
         self.word_vocab = loader.word_to_ix
         self.tag_vocab = loader.tag_to_ix
@@ -101,7 +86,7 @@ class NMTreeModel(nn.Module):
         self.dropout = nn.Dropout(opt.drop_prob)
 
         self.single_score = SingleScore(self.vis_dim, self.embed_size)
-        self.pair_score = PairScore(self.vis_dim ,self.embed_size)
+        self.pair_score = PairScore(self.vis_dim, self.embed_size)
 
         self.up_tree_lstm = UpTreeLSTM(self.embed_size, opt.rnn_size)
         self.down_tree_lstm = DownTreeLSTM(self.embed_size, opt.rnn_size)
@@ -119,7 +104,8 @@ class NMTreeModel(nn.Module):
         if node.num_children == 0:
             node.sub_word = [node.idx]
             node.sub_logit = [node.logit]
-            sbj_embedding = self.attn_embedding(node.sub_word, node.sub_logit, embedding, 'sbj')
+            sbj_embedding = self.attn_embedding(
+                node.sub_word, node.sub_logit, embedding, 'sbj')
             sbj_score = self.single_score(visual_feats, sbj_embedding)
             node.score = sbj_score
         # Case 2: Not leaf
@@ -127,28 +113,33 @@ class NMTreeModel(nn.Module):
             sub_word = [node.idx]
             sub_logit = [node.logit]
             for child in node.children:
-                sub_word = sub_word  + child.sub_word
+                sub_word = sub_word + child.sub_word
                 sub_logit = sub_logit + child.sub_logit
 
-            # Case 2.1: Not leaf, Language Node
+            # Sum module: Being picked in node.type is lang
             sbj_score = self.zero_score
             for child in node.children:
                 sbj_score = sbj_score + child.score
 
-            # Case 2.2: Not leaf, Visual Node
-            obj_embedding = self.attn_embedding(sub_word, sub_logit, embedding, 'obj')
+            # Comp module: Being picked in node.type is vis
+            obj_embedding = self.attn_embedding(
+                sub_word, sub_logit, embedding, 'obj')
             obj_score = self.single_score(visual_feats, obj_embedding)
             for child in node.children:
                 obj_score = obj_score + child.score
             node.obj_score = obj_score
-            rlt_embedding = self.attn_embedding(sub_word, sub_logit, embedding, 'rlt')
+            rlt_embedding = self.attn_embedding(
+                sub_word, sub_logit, embedding, 'rlt')
             rlt_score = self.pair_score(visual_feats, obj_score, rlt_embedding)
 
-            # Gumbel softmax, [lang, vis]
             node.sub_word = sub_word
             node.sub_logit = sub_logit
-            node.score = torch.mm(node.type, torch.stack([sbj_score, rlt_score], dim=0)).squeeze(0)
 
+            # MatMul done to pick up the valid score
+            # If node type is lang, pick sum module, and of node type is vis pick, comp module
+            # If node type is neither, i.e., [0, 0], keep the score as zero. We will do something with this later (ROOT node)
+            node.score = torch.mm(node.type, torch.stack(
+                [sbj_score, rlt_score], dim=0)).squeeze(0)
         return
 
     def list_to_embedding(self, sent):
@@ -184,13 +175,17 @@ class NMTreeModel(nn.Module):
 
     def attn_embedding(self, word_list, logit_list, embedding, logit_type):
         embed = embedding[word_list]
-        logits = torch.stack([logit[logit_type] for logit in logit_list], dim=0)
+        logits = torch.stack([logit[logit_type]
+                              for logit in logit_list], dim=0)
 
         attn = torch.softmax(logits, dim=0)
         attn_embed = torch.mm(attn.unsqueeze(0), embed)
 
         return attn_embed
 
+    # Taking hidden states from UpTree and DownTree
+    # and passing the concatenated state to NN
+    # to get the logit corresponding to the node
     def node_to_logit(self, node):
         hidden = torch.cat([node.up_state[1], node.down_state[1]], dim=-1)
         sbj_logit = self.sbj_attn_logit(hidden).squeeze()
@@ -210,38 +205,48 @@ class NMTreeModel(nn.Module):
         scores:   float32 (num_sent, num_box)
         """
         visual_features = data['vis']
+        # visual_features dim => (batch_size, num_rois, feature_dimension)
         self.num_bbox = visual_features.size(1)
-        self.zero_score = torch.zeros((self.num_bbox, ), dtype=torch.float32, requires_grad=False).cuda()
+        self.zero_score = torch.zeros(
+            (self.num_bbox, ), dtype=torch.float32, requires_grad=False).cuda()
 
         scores = []
         for i in range(len(data['trees'])):
+            # has DPT
             tree_dict = data['trees'][i]
+            # has DPT, tokens, words etc.
             sent_list = data['sents'][i]
+            # visual_feats dim => (num_rois, feature_dimension)
             visual_feats = visual_features[i]
 
-            # list of word embedding
+            # list of word embedding: contains word embedding list (num_words, emb_size)
+            # emb_size: 400 (300 for word, 50 for pos and 50 for dep)
             word_embed = self.list_to_embedding(sent_list)
 
             # build tree structure to class
-            tree = build_bitree(tree_dict)
+            root = build_bitree(tree_dict)
 
-            self.up_tree_lstm(tree, word_embed)
-            self.down_tree_lstm(tree, word_embed)
-            self.traversal(tree, visual_feats, word_embed)
+            # Upward propagation of embeddings in the tree (from leaves to root)
+            self.up_tree_lstm(root, word_embed)
+
+            # Downward propagation of embeddings in the tree (from root to leaves)
+            self.down_tree_lstm(root, word_embed)
+
+            # Updates the score of each node in the tree
+            self.traversal(root, visual_feats, word_embed)
 
             # for root
-            if tree.type[0, 0]:
-                sbj_embedding = self.attn_embedding(tree.sub_word, tree.sub_logit, word_embed, 'sbj')
+            if root.type[0, 0]:
+                sbj_embedding = self.attn_embedding(
+                    root.sub_word, root.sub_logit, word_embed, 'sbj')
                 sbj_score = self.single_score(visual_feats, sbj_embedding)
             else:
                 sbj_score = self.zero_score
-
-            score = sbj_score + tree.score
-
+            score = sbj_score + root.score
             scores.append(score)
 
         if is_show:
-            print(tree.__vis__(['type_', 'word']))
+            print(root.__vis__(['type_', 'word']))
 
         scores = torch.stack(scores, dim=0)
         return F.log_softmax(scores, dim=1)
@@ -263,7 +268,8 @@ class NMTreeModel(nn.Module):
 
         vis = data['vis']
         self.num_bbox = vis.size(1)
-        self.zero_score = torch.zeros((self.num_bbox, ), dtype=torch.float32, requires_grad=False).cuda()
+        self.zero_score = torch.zeros(
+            (self.num_bbox, ), dtype=torch.float32, requires_grad=False).cuda()
 
         for i in range(len(data['trees'])):
             tree_dict = data['trees'][i]
@@ -300,7 +306,8 @@ class NMTreeModel(nn.Module):
 
         vis = data['vis']
         self.num_bbox = vis.size(1)
-        self.zero_score = torch.zeros((self.num_bbox, ), dtype=torch.float32, requires_grad=False).cuda()
+        self.zero_score = torch.zeros(
+            (self.num_bbox, ), dtype=torch.float32, requires_grad=False).cuda()
 
         scores = []
         score_dict_list = []
@@ -322,7 +329,8 @@ class NMTreeModel(nn.Module):
 
             # for root
             if tree.type[0, 0]:
-                sbj_embedding = self.attn_embedding(tree.sub_word, tree.sub_logit, word_embed, 'sbj')
+                sbj_embedding = self.attn_embedding(
+                    tree.sub_word, tree.sub_logit, word_embed, 'sbj')
                 sbj_score = self.single_score(v, sbj_embedding)
             else:
                 sbj_score = self.zero_score
@@ -356,6 +364,7 @@ class UpTreeLSTM(nn.Module):
     Adapted from:
     https://github.com/dasguptar/treelstm.pytorch/blob/master/treelstm/model.py
     """
+
     def __init__(self, in_dim, mem_dim):
         super(UpTreeLSTM, self).__init__()
         self.in_dim = in_dim
@@ -373,7 +382,6 @@ class UpTreeLSTM(nn.Module):
         self.fx_lang = nn.Linear(self.in_dim, self.mem_dim)
         self.fh_lang = nn.Linear(self.mem_dim, self.mem_dim)
 
-        # Gumbel softmax
         self.type_query = nn.Linear(self.in_dim, 2)
         self.dropout = nn.Dropout()
 
@@ -412,6 +420,7 @@ class UpTreeLSTM(nn.Module):
         return c, h
 
     def forward(self, tree, inputs):
+        # traversing nodes leaf first
         for idx in range(tree.num_children):
             self.forward(tree.children[idx], inputs)
 
@@ -420,12 +429,20 @@ class UpTreeLSTM(nn.Module):
             child_h = inputs[0].data.new(1, self.mem_dim).zero_()
         else:
             child_c, child_h = zip(* map(lambda x: x.up_state, tree.children))
-            child_c, child_h = torch.cat(child_c, dim=0), torch.cat(child_h, dim=0)
+            child_c, child_h = torch.cat(
+                child_c, dim=0), torch.cat(child_h, dim=0)
 
-        c_vis, h_vis = self.node_forward_vis(inputs[tree.idx], child_c, child_h)
-        c_lang, h_lang = self.node_forward_lang(inputs[tree.idx], child_c, child_h)
+        # Cell state and Hidden state for visual nodes
+        c_vis, h_vis = self.node_forward_vis(
+            inputs[tree.idx], child_c, child_h)
 
-        # Gumbel softmax decision
+        # Cell state and Hidden state for lang nodes
+        c_lang, h_lang = self.node_forward_lang(
+            inputs[tree.idx], child_c, child_h)
+
+        # Getting embedding for the node and converting it to vector of length 2
+        # to check whether the node is lang node or vis node
+        # and applying gumbel-softmax on it to apply backprop on discrete values
         type_value = inputs[tree.idx].unsqueeze(0)
         type_weights = self.type_query(type_value)
 
@@ -435,6 +452,7 @@ class UpTreeLSTM(nn.Module):
             type_mask = gumbel.greedy_select(logits=type_weights)
             type_mask = type_mask.float()
 
+        # Select between choosing lang hidden/cell state and visual hidden/cell state
         h = torch.mm(type_mask, torch.cat([h_lang, h_vis], dim=0))
         c = torch.mm(type_mask, torch.cat([c_lang, c_vis], dim=0))
 
@@ -453,6 +471,7 @@ class DownTreeLSTM(nn.Module):
     Adapted from:
     https://github.com/dasguptar/treelstm.pytorch/blob/master/treelstm/model.py
     """
+
     def __init__(self, in_dim, mem_dim):
         super(DownTreeLSTM, self).__init__()
         self.in_dim = in_dim
@@ -470,7 +489,6 @@ class DownTreeLSTM(nn.Module):
         self.fx_lang = nn.Linear(self.in_dim, self.mem_dim)
         self.fh_lang = nn.Linear(self.mem_dim, self.mem_dim)
 
-        # Gumbel softmax
         self.dropout = nn.Dropout()
 
     def node_forward_vis(self, inputs, child_c, child_h):
@@ -514,16 +532,24 @@ class DownTreeLSTM(nn.Module):
         else:
             child_c, child_h = tree.parent.down_state
 
-        c_vis, h_vis = self.node_forward_vis(inputs[tree.idx], child_c, child_h)
-        c_lang, h_lang = self.node_forward_lang(inputs[tree.idx], child_c, child_h)
+        # Cell state and Hidden state for visual nodes
+        c_vis, h_vis = self.node_forward_vis(
+            inputs[tree.idx], child_c, child_h)
 
-        # Gumbel softmax decision
+        # Cell state and Hidden state for lang nodes
+        c_lang, h_lang = self.node_forward_lang(
+            inputs[tree.idx], child_c, child_h)
+
+        # Using cached node type used in UpTree
         type_mask = tree.type
+
+        # Select between choosing lang hidden/cell state and visual hidden/cell state
         h = torch.mm(type_mask, torch.cat([h_lang, h_vis], dim=0))
         c = torch.mm(type_mask, torch.cat([c_lang, c_vis], dim=0))
 
         tree.down_state = (c, self.dropout(h))
 
+        # traversing nodes root first
         for idx in range(tree.num_children):
             self.forward(tree.children[idx], inputs)
 
@@ -589,7 +615,8 @@ class BiTree(object):
         """
         if not attributes:
             attributes = ["word"]
-        node_name = ', '.join(map(str, [getattr(self, v) for v in attributes if hasattr(self, v)]))
+        node_name = ', '.join(
+            map(str, [getattr(self, v) for v in attributes if hasattr(self, v)]))
 
         LEN = max(3, len(node_name) if not self.children or show_internal else 3)
         PAD = ' ' * LEN
@@ -606,7 +633,8 @@ class BiTree(object):
                     char2 = '\\'
                 else:
                     char2 = '-'
-                (clines, mid) = c._asciiArt(char2, show_internal, compact, attributes)
+                (clines, mid) = c._asciiArt(
+                    char2, show_internal, compact, attributes)
                 mids.append(mid+len(result))
                 result.extend(clines)
                 if not compact:
@@ -617,7 +645,7 @@ class BiTree(object):
             prefixes = [PAD] * (lo+1) + [PA+'|'] * (hi-lo-1) + [PAD] * (end-hi)
             mid = int((lo + hi) / 2)
             prefixes[mid] = char1 + '-'*(LEN-1) + prefixes[mid][-1]
-            result = [p+l for (p,l) in zip(prefixes, result)]
+            result = [p+l for (p, l) in zip(prefixes, result)]
             if show_internal:
                 stem = result[mid]
                 result[mid] = stem[0] + node_name + stem[len(node_name)+1:]
